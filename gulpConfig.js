@@ -369,14 +369,17 @@ const defaultNotifyServer = {
   }
 };
 
+exports.notifyServer = Object.assign(
+  defaultNotifyServer,
+  environment.notifyServer
+);
+
 exports.occupiedPorts = {
   server: environment.$Server.port,
-  notifyServer: defaultNotifyServer.port,
+  notifyServer: exports.notifyServer.port,
   livereload: exports.liveServer.port || 35729,
   'fb-flo': 5888
 };
-
-exports.notifyServer = defaultNotifyServer;
 
 exports.onTerminate = () => {
   setTimeout(() => {
