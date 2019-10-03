@@ -6,6 +6,8 @@ const remember = require('gulp-remember');
 const watch = require('gulp-watch');
 const path = require('path');
 const net = require('net');
+const fs = require('fs');
+const WebSocket = require('ws');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 
@@ -16,10 +18,21 @@ const notifyServer = dgram.createSocket('udp4');
 let notifyServerMessageTimeout = null;
 let notifyServerJobQueue = [];
 
+const chokidar = require('chokidar');
+const WsServer = require('../lib/wsserver');
+
+const HR_SENTINEL_NAME = 'watch/hot-reload';
+
 exports.__requiresConfig = true;
 
 exports.default = gulpConfig => {
-  const { files, occupiedPorts, notifyServer: notifyServerConfig } = gulpConfig;
+  const {
+    files,
+    occupiedPorts,
+    notifyServerConfig,
+    wsServerConfig,
+    hotReloadConfig
+  } = gulpConfig;
 
   function watchTask() {
     let hotReloadedCacheKeys = [];
@@ -35,6 +48,54 @@ exports.default = gulpConfig => {
     runGulpTaskOnChange(files.locale.watch, 'locale:build');
     runGulpTaskOnChange('./app/assets/static/**/*', 'copy:appStatic');
 
+    // Websocket server
+    if (wsServerConfig.enable) {
+      if (!sharedState.wsServer) {
+        log(`Staring wsServer on port: ${wsServerConfig.port}`);
+        sharedState.wsServer = new WsServer({ port: wsServerConfig.port });
+      }
+    }
+
+    // HotReload watchers
+    if (hotReloadConfig.watch) {
+      log(
+        `Staring hotReload watchers for paths: ${hotReloadConfig.watch.join(
+          ', '
+        )}`
+      );
+
+      if (!sharedState.wsClient) {
+        log(`Staring hotReload client on port ${wsServerConfig.port}`);
+        sharedState.wsClient = new WebSocket(
+          'ws://localhost:' + wsServerConfig.port
+        );
+      }
+      const watcher = chokidar.watch(hotReloadConfig.watch, {
+        persistent: true
+      });
+      watcher.on('change', hotReloadChangeBroadcast);
+    }
+
+    // HotReload callback
+    function hotReloadChangeBroadcast(filename) {
+      filename = path.normalize(filename).replace(/\\/g, '/');
+      const hotReload = {
+        sentinel: HR_SENTINEL_NAME,
+        payload: {
+          filename,
+          contents: ''
+        }
+      };
+      log(`hotReload: resource updated '${color.cyan(filename)}'`);
+
+      hotReload.payload.contents = fs.readFileSync(filename, 'utf8');
+
+      if (sharedState.wsClient) {
+        sharedState.wsClient.send(JSON.stringify(hotReload));
+      }
+    }
+
+    // Notification server
     if (notifyServerConfig.enable) {
       notifyServer.bind({
         address: notifyServerConfig.server,

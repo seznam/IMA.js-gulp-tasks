@@ -7,3 +7,7 @@
 exports.watchEvent = null;
 
 exports.watchMode = false;
+
+exports.wsServer = null;
+
+exports.wsClient = null;
