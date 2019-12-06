@@ -1,3 +1,5 @@
+The package was moved to https://github.com/seznam/ima/tree/master/packages/gulp-tasks.
+
 # IMA.js-gulp-tasks
 
 This repository houses the default build tasks implementation for IMA.js
