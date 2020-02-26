@@ -1,13 +1,13 @@
 const gulp = require('gulp');
 const cache = require('gulp-cached');
-const flo = require('fb-flo');
 const color = require('ansi-colors');
 const log = require('fancy-log');
 const remember = require('gulp-remember');
 const watch = require('gulp-watch');
 const path = require('path');
-const fs = require('fs');
 const net = require('net');
+const fs = require('fs');
+const WebSocket = require('ws');
 const { promisify } = require('util');
 const exec = promisify(require('child_process').exec);
 
@@ -18,21 +18,84 @@ const notifyServer = dgram.createSocket('udp4');
 let notifyServerMessageTimeout = null;
 let notifyServerJobQueue = [];
 
+const chokidar = require('chokidar');
+const WsServer = require('../lib/wsserver');
+
+const HR_SENTINEL_NAME = 'watch/hot-reload';
+
 exports.__requiresConfig = true;
 
 exports.default = gulpConfig => {
-  const { files, occupiedPorts, notifyServer: notifyServerConfig } = gulpConfig;
+  const {
+    files,
+    occupiedPorts,
+    notifyServerConfig,
+    wsServerConfig,
+    hotReloadConfig
+  } = gulpConfig;
 
   function watchTask() {
     let hotReloadedCacheKeys = [];
 
-    runOnChange(files.app.watch, 'app:build');
-    runOnChange(files.vendor.watch, 'vendor:build');
-    runOnChange(files.less.watch, 'less:build');
-    runOnChange(files.server.watch, 'server:build');
-    runOnChange(files.locale.watch, 'locale:build');
-    runOnChange('./app/assets/static/**/*', 'copy:appStatic');
+    function runGulpTaskOnChange(files, task) {
+      watch(files, () => gulp.series(task)());
+    }
 
+    runGulpTaskOnChange(files.app.watch, 'app:build');
+    runGulpTaskOnChange(files.vendor.watch, 'vendor:build');
+    runGulpTaskOnChange(files.less.watch, 'less:build');
+    runGulpTaskOnChange(files.server.watch, 'server:build');
+    runGulpTaskOnChange(files.locale.watch, 'locale:build');
+    runGulpTaskOnChange('./app/assets/static/**/*', 'copy:appStatic');
+
+    // Websocket server
+    if (wsServerConfig.enable) {
+      if (!sharedState.wsServer) {
+        log(`Staring wsServer on port: ${wsServerConfig.port}`);
+        sharedState.wsServer = new WsServer({ port: wsServerConfig.port });
+      }
+    }
+
+    // HotReload watchers
+    if (hotReloadConfig.watch) {
+      log(
+        `Staring hotReload watchers for paths: ${hotReloadConfig.watch.join(
+          ', '
+        )}`
+      );
+
+      if (!sharedState.wsClient) {
+        log(`Staring hotReload client on port ${wsServerConfig.port}`);
+        sharedState.wsClient = new WebSocket(
+          'ws://localhost:' + wsServerConfig.port
+        );
+      }
+      const watcher = chokidar.watch(hotReloadConfig.watch, {
+        persistent: true
+      });
+      watcher.on('change', hotReloadChangeBroadcast);
+    }
+
+    // HotReload callback
+    function hotReloadChangeBroadcast(filename) {
+      filename = path.normalize(filename).replace(/\\/g, '/');
+      const hotReload = {
+        sentinel: HR_SENTINEL_NAME,
+        payload: {
+          filename,
+          contents: ''
+        }
+      };
+      log(`hotReload: resource updated '${color.cyan(filename)}'`);
+
+      hotReload.payload.contents = fs.readFileSync(filename, 'utf8');
+
+      if (sharedState.wsClient) {
+        sharedState.wsClient.send(JSON.stringify(hotReload));
+      }
+    }
+
+    // Notification server
     if (notifyServerConfig.enable) {
       notifyServer.bind({
         address: notifyServerConfig.server,
@@ -102,46 +165,6 @@ exports.default = gulpConfig => {
           }
         }
       });
-
-    flo(
-      './build/static/',
-      {
-        port: occupiedPorts['fb-flo'],
-        host: 'localhost',
-        glob: ['**/*.css', '**/*.js']
-      },
-      (filepath, callback) => {
-        log(`Reloading 'public/${color.cyan(filepath)}' with ` + 'flo...');
-
-        let hotReloadedContents = '';
-
-        if (path.parse(filepath).ext === '.css') {
-          hotReloadedContents = fs.readFileSync('./build/static/' + filepath);
-        } else {
-          hotReloadedContents = hotReloadedCacheKeys.map(cacheKey => {
-            let file = remember.cacheFor('Es6ToEs5:server:app')[cacheKey];
-            if (!file) {
-              return '';
-            }
-
-            return file.contents
-              .toString()
-              .replace(/System.import/g, '$IMA.Loader.import')
-              .replace(/System.register/g, '$IMA.Loader.replaceModule');
-          });
-          hotReloadedCacheKeys = [];
-        }
-
-        callback({
-          resourceURL: 'static/' + filepath,
-          contents: hotReloadedContents
-        });
-      }
-    );
-
-    function runOnChange(files, task) {
-      watch(files, () => gulp.series(task)());
-    }
   }
 
   function checkAndReleasePorts() {
